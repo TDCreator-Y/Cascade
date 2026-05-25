@@ -56,31 +56,61 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     let mut dest_addr = Vec::new();
     dest_addr.extend_from_slice(&req_header);
 
+    let host: String;
+    let port: u16;
+
     // 解析目标地址
     match atyp {
-        0x01 => {
-            // IPv4
+        0x01 => { // IPv4
             let mut addr = [0u8; 6]; // 4 字节 IP + 2 字节端口
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
+            host = format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
+            port = u16::from_be_bytes([addr[4], addr[5]]);
         }
-        0x03 => {
-            // 域名
+        0x03 => { // 域名
             let mut len = [0u8; 1];
             client.read_exact(&mut len).await?;
             dest_addr.push(len[0]);
             let mut addr = vec![0u8; len[0] as usize + 2]; // 域名内容 + 2 字节端口
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
+            let domain_bytes = &addr[..len[0] as usize];
+            host = String::from_utf8_lossy(domain_bytes).to_string();
+            port = u16::from_be_bytes([addr[len[0] as usize], addr[len[0] as usize + 1]]);
         }
-        0x04 => {
-            // IPv6
+        0x04 => { // IPv6
             let mut addr = [0u8; 18]; // 16 字节 IP + 2 字节端口
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&addr[0..16]);
+            host = std::net::Ipv6Addr::from(ip_bytes).to_string();
+            port = u16::from_be_bytes([addr[16], addr[17]]);
         }
         _ => return Err("Unsupported address type".into()),
     }
+
+    // ==========================================
+    // 1.5 智能分流 (Routing Engine)
+    // ==========================================
+    let direct_domains = vec![
+        ".cn", "baidu.com", "qq.com", "bilibili.com", "taobao.com", "127.0.0.1", "localhost"
+    ];
+    let is_direct = direct_domains.iter().any(|d| host.ends_with(d) || host == *d);
+
+    if is_direct {
+        println!("Routing Engine: Direct Connect -> {}:{}", host, port);
+        let target_addr = format!("{}:{}", host, port);
+        let mut target_stream = TcpStream::connect(&target_addr).await?;
+        
+        // 返回全 0 地址作为成功响应给本地客户端
+        client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        tokio::io::copy_bidirectional(&mut client, &mut target_stream).await?;
+        return Ok(());
+    }
+
+    println!("Routing Engine: Cascade Tunnel -> {}:{}", host, port);
 
     // ==========================================
     // 2. 连接本地 VPN 端口

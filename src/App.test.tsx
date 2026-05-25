@@ -29,7 +29,7 @@ describe("App Component", () => {
     expect(startButton).toBeDefined();
   });
 
-  it("handles successful cascade engine start", async () => {
+  it("handles successful cascade engine start and stop", async () => {
     // Setup mock to resolve successfully
     vi.mocked(invoke).mockResolvedValueOnce("Cascade Engine started successfully");
     
@@ -39,12 +39,20 @@ describe("App Component", () => {
     // Click the button
     fireEvent.click(startButton);
     
-    // Button should show loading state immediately
-    expect(screen.getByText("Starting Engine...")).toBeDefined();
-    
-    // Wait for the success message to appear
+    // Wait for the success message and stop button to appear
     await waitFor(() => {
       expect(screen.getByText("Cascade Engine started successfully")).toBeDefined();
+      expect(screen.getByRole("button", { name: /停止 Cascade/i })).toBeDefined();
+    });
+
+    // Mock stop function
+    vi.mocked(invoke).mockResolvedValueOnce("Cascade Engine stopped successfully");
+    const stopButton = screen.getByRole("button", { name: /停止 Cascade/i });
+    fireEvent.click(stopButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Cascade Engine 已停止，系统代理已恢复")).toBeDefined();
+      expect(screen.getByRole("button", { name: /启动 Cascade/i })).toBeDefined();
     });
   });
 
