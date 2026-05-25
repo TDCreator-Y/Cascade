@@ -22,7 +22,7 @@
 
 ### UI Preview
 <div align="center">
-  <img src="https://via.placeholder.com/600x400?text=Cascade+UI+Preview" alt="UI Preview" width="600"/>
+  <img src="docs/UI.png" alt="UI Preview" width="600"/>
 </div>
 
 ### Installation & Build
