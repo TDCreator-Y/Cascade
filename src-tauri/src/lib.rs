@@ -1,5 +1,6 @@
 pub mod cascade_core;
 pub mod sys_proxy;
+pub mod cli_proxy;
 
 use cascade_core::CascadeConfig;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,16 @@ struct AppState {
     server_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[tauri::command]
+fn toggle_git_proxy(enable: bool) -> Result<(), String> {
+    cli_proxy::set_git_proxy(enable, 10808)
+}
+
+#[tauri::command]
+fn toggle_npm_proxy(enable: bool) -> Result<(), String> {
+    cli_proxy::set_npm_proxy(enable, 10808)
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 async fn start_cascade(
@@ -18,6 +29,8 @@ async fn start_cascade(
     isp_port: u16,
     username: String,
     password: String,
+    git_proxy: bool,
+    npm_proxy: bool,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     println!("Cascade Engine Initialized with dynamic parameters");
@@ -32,6 +45,10 @@ async fn start_cascade(
         eprintln!("Failed to enable system proxy: {}", e);
         return Err(e);
     }
+
+    // 同步开启 CLI 代理
+    let _ = cli_proxy::set_git_proxy(git_proxy, 10808);
+    let _ = cli_proxy::set_npm_proxy(npm_proxy, 10808);
 
     let config = Arc::new(CascadeConfig {
         vpn_port,
@@ -65,6 +82,10 @@ async fn stop_cascade(state: State<'_, AppState>) -> Result<String, String> {
         return Err(e);
     }
 
+    // 清除所有的 CLI 代理配置
+    let _ = cli_proxy::set_git_proxy(false, 10808);
+    let _ = cli_proxy::set_npm_proxy(false, 10808);
+
     println!("Cascade Engine Stopped");
     Ok("Cascade Engine stopped and System Proxy restored".to_string())
 }
@@ -77,15 +98,22 @@ pub fn run() {
         })
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![start_cascade, stop_cascade])
+        .invoke_handler(tauri::generate_handler![
+            start_cascade, 
+            stop_cascade, 
+            toggle_git_proxy, 
+            toggle_npm_proxy
+        ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
     app.run(|_app_handle, event| match event {
         tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-            // 确保应用退出时强制恢复系统代理
-            println!("Application exiting, restoring system proxy...");
+            // 确保应用退出时强制恢复系统代理并清除 CLI 代理
+            println!("Application exiting, restoring system proxy and CLI proxies...");
             let _ = sys_proxy::disable_sys_proxy();
+            let _ = cli_proxy::set_git_proxy(false, 10808);
+            let _ = cli_proxy::set_npm_proxy(false, 10808);
         }
         _ => {}
     });

@@ -13,82 +13,173 @@ pub struct CascadeConfig {
 
 pub async fn start_server(config: Arc<CascadeConfig>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind("127.0.0.1:10808").await?;
-    println!("Cascade Engine: Socks5 listening on 127.0.0.1:10808");
+    println!("Cascade Engine: Mixed Port (SOCKS5/HTTP) listening on 127.0.0.1:10808");
 
     loop {
         let (client, addr) = listener.accept().await?;
-        println!("Cascade Engine: Accepted connection from {}", addr);
         
         let cfg = Arc::clone(&config);
         tokio::spawn(async move {
             if let Err(e) = handle_client(client, cfg).await {
-                eprintln!("Cascade Engine Error handling client: {}", e);
+                // Suppress common connection reset errors to avoid spam
+                let err_str = e.to_string();
+                if !err_str.contains("Connection reset by peer") && !err_str.contains("Broken pipe") {
+                    eprintln!("Cascade Engine Error [{}]: {}", addr, e);
+                }
             }
         });
     }
 }
 
 async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // ==========================================
-    // 1. 本地 Socks5 握手阶段 (处理来自本地软件的请求)
-    // ==========================================
-    let mut buf = [0u8; 2];
-    client.read_exact(&mut buf).await?;
-    if buf[0] != 0x05 {
-        return Err("Invalid Socks5 version from local client".into());
+    let mut protocol_buf = [0u8; 1];
+    // 偷看第一个字节以判断协议
+    let n = client.peek(&mut protocol_buf).await?;
+    if n == 0 {
+        return Ok(());
     }
 
-    let nmethods = buf[1] as usize;
-    let mut methods = vec![0u8; nmethods];
-    client.read_exact(&mut methods).await?;
+    let is_socks5 = protocol_buf[0] == 0x05;
+    // 如果首字母是 ASCII 大写字母，我们认为是 HTTP 代理请求 (CONNECT, GET, POST, OPTIONS 等)
+    let is_http = protocol_buf[0].is_ascii_uppercase();
 
-    // 回复无须认证 (No Auth)
-    client.write_all(&[0x05, 0x00]).await?;
-
-    // 读取连接目标请求
-    let mut req_header = [0u8; 4];
-    client.read_exact(&mut req_header).await?;
-    if req_header[1] != 0x01 {
-        return Err("Only CONNECT command is supported".into());
+    if !is_socks5 && !is_http {
+        // 静默丢弃不支持的协议
+        return Ok(());
     }
-
-    let atyp = req_header[3];
-    let mut dest_addr = Vec::new();
-    dest_addr.extend_from_slice(&req_header);
 
     let host: String;
     let port: u16;
+    let mut dest_addr = Vec::new();
+    
+    // 用于区分是否为 HTTPS 的 CONNECT 请求，或者是普通 HTTP 请求
+    let mut is_connect = false;
+    // 如果是普通 HTTP 请求，我们需要将读取的 HTTP Header 原封不动地发送给目标服务器
+    let mut initial_data_to_target = Vec::new();
 
-    // 解析目标地址
-    match atyp {
-        0x01 => { // IPv4
-            let mut addr = [0u8; 6]; // 4 字节 IP + 2 字节端口
-            client.read_exact(&mut addr).await?;
-            dest_addr.extend_from_slice(&addr);
-            host = format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
-            port = u16::from_be_bytes([addr[4], addr[5]]);
+    if is_socks5 {
+        // ==========================================
+        // 1a. 本地 SOCKS5 握手阶段
+        // ==========================================
+        let mut buf = [0u8; 2];
+        client.read_exact(&mut buf).await?;
+        let nmethods = buf[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        client.read_exact(&mut methods).await?;
+        
+        // 回复无须认证
+        client.write_all(&[0x05, 0x00]).await?;
+
+        let mut req_header = [0u8; 4];
+        client.read_exact(&mut req_header).await?;
+        if req_header[1] != 0x01 {
+            return Err("Only CONNECT command is supported".into());
         }
-        0x03 => { // 域名
-            let mut len = [0u8; 1];
-            client.read_exact(&mut len).await?;
-            dest_addr.push(len[0]);
-            let mut addr = vec![0u8; len[0] as usize + 2]; // 域名内容 + 2 字节端口
-            client.read_exact(&mut addr).await?;
-            dest_addr.extend_from_slice(&addr);
-            let domain_bytes = &addr[..len[0] as usize];
-            host = String::from_utf8_lossy(domain_bytes).to_string();
-            port = u16::from_be_bytes([addr[len[0] as usize], addr[len[0] as usize + 1]]);
+
+        let atyp = req_header[3];
+        dest_addr.extend_from_slice(&req_header);
+
+        match atyp {
+            0x01 => { // IPv4
+                let mut addr = [0u8; 6];
+                client.read_exact(&mut addr).await?;
+                dest_addr.extend_from_slice(&addr);
+                host = format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
+                port = u16::from_be_bytes([addr[4], addr[5]]);
+            }
+            0x03 => { // 域名
+                let mut len = [0u8; 1];
+                client.read_exact(&mut len).await?;
+                dest_addr.push(len[0]);
+                let mut addr = vec![0u8; len[0] as usize + 2];
+                client.read_exact(&mut addr).await?;
+                dest_addr.extend_from_slice(&addr);
+                let domain_bytes = &addr[..len[0] as usize];
+                host = String::from_utf8_lossy(domain_bytes).to_string();
+                port = u16::from_be_bytes([addr[len[0] as usize], addr[len[0] as usize + 1]]);
+            }
+            0x04 => { // IPv6
+                let mut addr = [0u8; 18];
+                client.read_exact(&mut addr).await?;
+                dest_addr.extend_from_slice(&addr);
+                let mut ip_bytes = [0u8; 16];
+                ip_bytes.copy_from_slice(&addr[0..16]);
+                host = std::net::Ipv6Addr::from(ip_bytes).to_string();
+                port = u16::from_be_bytes([addr[16], addr[17]]);
+            }
+            _ => return Err("Unsupported address type".into()),
         }
-        0x04 => { // IPv6
-            let mut addr = [0u8; 18]; // 16 字节 IP + 2 字节端口
-            client.read_exact(&mut addr).await?;
-            dest_addr.extend_from_slice(&addr);
-            let mut ip_bytes = [0u8; 16];
-            ip_bytes.copy_from_slice(&addr[0..16]);
-            host = std::net::Ipv6Addr::from(ip_bytes).to_string();
-            port = u16::from_be_bytes([addr[16], addr[17]]);
+    } else {
+        // ==========================================
+        // 1b. 本地 HTTP/CONNECT 代理握手阶段
+        // ==========================================
+        let mut header = Vec::new();
+        let mut buf = [0u8; 1];
+        loop {
+            if client.read_exact(&mut buf).await.is_err() {
+                return Ok(());
+            }
+            header.push(buf[0]);
+            if header.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            if header.len() > 8192 {
+                return Ok(()); // Header too large, drop silently
+            }
         }
-        _ => return Err("Unsupported address type".into()),
+
+        let header_str = String::from_utf8_lossy(&header);
+        let first_line = header_str.lines().next().unwrap_or("");
+        let parts: Vec<&str> = first_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return Ok(());
+        }
+
+        let method = parts[0];
+        let uri = parts[1];
+
+        if method == "CONNECT" {
+            // HTTPS 代理请求 (CONNECT domain.com:443 HTTP/1.1)
+            is_connect = true;
+            let mut hp_parts = uri.split(':');
+            host = hp_parts.next().unwrap_or("").to_string();
+            port = hp_parts.next().unwrap_or("443").parse().unwrap_or(443);
+        } else {
+            // 普通 HTTP 代理请求 (GET http://example.com/ HTTP/1.1)
+            is_connect = false;
+            initial_data_to_target = header.clone(); // 记录下 Header 以便稍后原封不动地转发
+
+            if uri.starts_with("http://") {
+                let without_scheme = &uri[7..];
+                let host_port_path: Vec<&str> = without_scheme.splitn(2, '/').collect();
+                let mut hp_parts = host_port_path[0].split(':');
+                host = hp_parts.next().unwrap_or("").to_string();
+                port = hp_parts.next().unwrap_or("80").parse().unwrap_or(80);
+            } else {
+                // 如果 URI 中没有完整路径，尝试从 Host 头中提取
+                let mut found_host = String::new();
+                for line in header_str.lines() {
+                    if line.to_lowercase().starts_with("host:") {
+                        found_host = line[5..].trim().to_string();
+                        break;
+                    }
+                }
+                let mut hp_parts = found_host.split(':');
+                host = hp_parts.next().unwrap_or("").to_string();
+                port = hp_parts.next().unwrap_or("80").parse().unwrap_or(80);
+            }
+        }
+
+        // 构建兼容 SOCKS5 的 dest_addr 供后续级联隧道使用
+        dest_addr.push(0x05);
+        dest_addr.push(0x01);
+        dest_addr.push(0x00);
+        dest_addr.push(0x03); // 域名类型
+        
+        let host_bytes = host.as_bytes();
+        dest_addr.push(host_bytes.len() as u8);
+        dest_addr.extend_from_slice(host_bytes);
+        dest_addr.extend_from_slice(&port.to_be_bytes());
     }
 
     // ==========================================
@@ -104,8 +195,15 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
         let target_addr = format!("{}:{}", host, port);
         let mut target_stream = TcpStream::connect(&target_addr).await?;
         
-        // 返回全 0 地址作为成功响应给本地客户端
-        client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+        if is_socks5 {
+            reply_success(&mut client, true).await?;
+        } else if is_connect {
+            reply_success(&mut client, false).await?;
+        } else {
+            // 普通 HTTP 请求，不回复 200 Established，直接把之前截获的 Header 转发给目标
+            target_stream.write_all(&initial_data_to_target).await?;
+        }
+
         tokio::io::copy_bidirectional(&mut client, &mut target_stream).await?;
         return Ok(());
     }
@@ -121,7 +219,6 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     // ==========================================
     // 3. 要求本地 VPN 建立通往远程 ISP 的隧道
     // ==========================================
-    // 与 VPN 握手
     vpn_stream.write_all(&[0x05, 0x01, 0x00]).await?;
     let mut vpn_resp = [0u8; 2];
     vpn_stream.read_exact(&mut vpn_resp).await?;
@@ -129,7 +226,6 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
         return Err("VPN Socks5 initial auth failed".into());
     }
 
-    // 解析 isp_ip 为 IPv4 字节
     let ip_parts: Vec<u8> = config.isp_ip.split('.')
         .filter_map(|s| s.parse::<u8>().ok())
         .collect();
@@ -149,13 +245,11 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     if vpn_rep[1] != 0x00 {
         return Err("VPN failed to connect to remote ISP".into());
     }
-    // 跳过 Bind Address 数据
     skip_socks5_addr(&mut vpn_stream, vpn_rep[3]).await?;
 
     // ==========================================
     // 4. 隧道打通后，在同一个 TCP 流上再次进行 Socks5 握手并鉴权 (发往 ISP)
     // ==========================================
-    // 发送支持 0x02(Username/Password) 认证方式
     vpn_stream.write_all(&[0x05, 0x01, 0x02]).await?;
     let mut isp_resp = [0u8; 2];
     vpn_stream.read_exact(&mut isp_resp).await?;
@@ -163,7 +257,6 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
         return Err("Remote ISP did not accept Auth method 0x02".into());
     }
 
-    // 发送鉴权信息 (需替换为实际的用户名密码)
     let user = config.username.as_bytes();
     let pass = config.password.as_bytes();
     let mut auth_req = vec![0x01, user.len() as u8];
@@ -190,12 +283,16 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     skip_socks5_addr(&mut vpn_stream, isp_rep[3]).await?;
 
     // ==========================================
-    // 6. 告诉本地客户端通道已建立，准备转发数据
+    // 6. 告诉本地客户端通道已建立 (如果是 HTTPS 或 SOCKS)
+    //    或者将读取的 Header 发往远程 ISP (如果是普通 HTTP)
     // ==========================================
-    // 返回全 0 地址作为成功响应
-    client
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        .await?;
+    if is_socks5 {
+        reply_success(&mut client, true).await?;
+    } else if is_connect {
+        reply_success(&mut client, false).await?;
+    } else {
+        vpn_stream.write_all(&initial_data_to_target).await?;
+    }
 
     // ==========================================
     // 7. 使用 copy_bidirectional 双向转发流量
@@ -205,11 +302,17 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     Ok(())
 }
 
+async fn reply_success(client: &mut TcpStream, is_socks5: bool) -> Result<(), std::io::Error> {
+    if is_socks5 {
+        client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    } else {
+        client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+    }
+    Ok(())
+}
+
 /// 辅助函数：根据 ATYP 跳过 Socks5 返回的 Bind Address 信息
-async fn skip_socks5_addr(
-    stream: &mut TcpStream,
-    atyp: u8,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn skip_socks5_addr(stream: &mut TcpStream, atyp: u8) -> Result<(), Box<dyn Error + Send + Sync>> {
     match atyp {
         0x01 => {
             let mut buf = [0u8; 6];
