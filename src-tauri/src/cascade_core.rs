@@ -1,8 +1,17 @@
 use std::error::Error;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-pub async fn start_server() -> Result<(), Box<dyn Error + Send + Sync>> {
+pub struct CascadeConfig {
+    pub vpn_port: u16,
+    pub isp_ip: String,
+    pub isp_port: u16,
+    pub username: String,
+    pub password: String,
+}
+
+pub async fn start_server(config: Arc<CascadeConfig>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind("127.0.0.1:10808").await?;
     println!("Cascade Engine: Socks5 listening on 127.0.0.1:10808");
 
@@ -10,15 +19,16 @@ pub async fn start_server() -> Result<(), Box<dyn Error + Send + Sync>> {
         let (client, addr) = listener.accept().await?;
         println!("Cascade Engine: Accepted connection from {}", addr);
         
+        let cfg = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client).await {
+            if let Err(e) = handle_client(client, cfg).await {
                 eprintln!("Cascade Engine Error handling client: {}", e);
             }
         });
     }
 }
 
-async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Result<(), Box<dyn Error + Send + Sync>> {
     // ==========================================
     // 1. 本地 Socks5 握手阶段 (处理来自本地软件的请求)
     // ==========================================
@@ -27,11 +37,11 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
     if buf[0] != 0x05 {
         return Err("Invalid Socks5 version from local client".into());
     }
-    
+
     let nmethods = buf[1] as usize;
     let mut methods = vec![0u8; nmethods];
     client.read_exact(&mut methods).await?;
-    
+
     // 回复无须认证 (No Auth)
     client.write_all(&[0x05, 0x00]).await?;
 
@@ -48,12 +58,14 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
 
     // 解析目标地址
     match atyp {
-        0x01 => { // IPv4
+        0x01 => {
+            // IPv4
             let mut addr = [0u8; 6]; // 4 字节 IP + 2 字节端口
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
         }
-        0x03 => { // 域名
+        0x03 => {
+            // 域名
             let mut len = [0u8; 1];
             client.read_exact(&mut len).await?;
             dest_addr.push(len[0]);
@@ -61,7 +73,8 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
         }
-        0x04 => { // IPv6
+        0x04 => {
+            // IPv6
             let mut addr = [0u8; 18]; // 16 字节 IP + 2 字节端口
             client.read_exact(&mut addr).await?;
             dest_addr.extend_from_slice(&addr);
@@ -72,10 +85,11 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
     // ==========================================
     // 2. 连接本地 VPN 端口
     // ==========================================
-    let mut vpn_stream = TcpStream::connect("127.0.0.1:7897").await?;
+    let vpn_addr = format!("127.0.0.1:{}", config.vpn_port);
+    let mut vpn_stream = TcpStream::connect(&vpn_addr).await?;
 
     // ==========================================
-    // 3. 要求本地 VPN 建立通往远程 ISP (64.51.26.139:443) 的隧道
+    // 3. 要求本地 VPN 建立通往远程 ISP 的隧道
     // ==========================================
     // 与 VPN 握手
     vpn_stream.write_all(&[0x05, 0x01, 0x00]).await?;
@@ -85,10 +99,19 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
         return Err("VPN Socks5 initial auth failed".into());
     }
 
-    // 构造发往 64.51.26.139:443 的请求
-    // 64.51.26.139 => 0x40, 0x33, 0x1A, 0x8B
-    // 443 => 0x01, 0xBB
-    let isp_tunnel_req = [0x05, 0x01, 0x00, 0x01, 64, 51, 26, 139, 0x01, 0xBB];
+    // 解析 isp_ip 为 IPv4 字节
+    let ip_parts: Vec<u8> = config.isp_ip.split('.')
+        .filter_map(|s| s.parse::<u8>().ok())
+        .collect();
+    if ip_parts.len() != 4 {
+        return Err("Invalid IPv4 address format for ISP IP".into());
+    }
+    let port_bytes = config.isp_port.to_be_bytes();
+
+    let mut isp_tunnel_req = vec![0x05, 0x01, 0x00, 0x01];
+    isp_tunnel_req.extend_from_slice(&ip_parts);
+    isp_tunnel_req.extend_from_slice(&port_bytes);
+
     vpn_stream.write_all(&isp_tunnel_req).await?;
 
     let mut vpn_rep = [0u8; 4];
@@ -111,8 +134,8 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
     }
 
     // 发送鉴权信息 (需替换为实际的用户名密码)
-    let user = b"LhmwzXCraCKc";
-    let pass = b"XjRBqphm8L";
+    let user = config.username.as_bytes();
+    let pass = config.password.as_bytes();
     let mut auth_req = vec![0x01, user.len() as u8];
     auth_req.extend_from_slice(user);
     auth_req.push(pass.len() as u8);
@@ -140,7 +163,9 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
     // 6. 告诉本地客户端通道已建立，准备转发数据
     // ==========================================
     // 返回全 0 地址作为成功响应
-    client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    client
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await?;
 
     // ==========================================
     // 7. 使用 copy_bidirectional 双向转发流量
@@ -151,7 +176,10 @@ async fn handle_client(mut client: TcpStream) -> Result<(), Box<dyn Error + Send
 }
 
 /// 辅助函数：根据 ATYP 跳过 Socks5 返回的 Bind Address 信息
-async fn skip_socks5_addr(stream: &mut TcpStream, atyp: u8) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn skip_socks5_addr(
+    stream: &mut TcpStream,
+    atyp: u8,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     match atyp {
         0x01 => {
             let mut buf = [0u8; 6];

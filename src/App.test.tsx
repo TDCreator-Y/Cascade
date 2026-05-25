@@ -8,13 +8,21 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+// Mock the Tauri store plugin
+vi.mock("@tauri-apps/plugin-store", () => ({
+  LazyStore: class {
+    async get() { return null; }
+    async set() { return undefined; }
+    async save() { return undefined; }
+  }
+}));
+
 describe("App Component", () => {
   it("renders the main interface correctly", () => {
     render(<App />);
     
     // Check if title is present
-    expect(screen.getByText("Cascade")).toBeDefined();
-    expect(screen.getByText("Advanced Network Proxy Engine")).toBeDefined();
+    expect(screen.getByText("Cascade Config")).toBeDefined();
     
     // Check if start button is present
     const startButton = screen.getByRole("button", { name: /启动 Cascade/i });
