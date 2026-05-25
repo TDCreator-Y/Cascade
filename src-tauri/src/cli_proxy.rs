@@ -25,48 +25,32 @@ fn broadcast_env_change() {
     }
 }
 
-pub fn set_git_proxy(enable: bool, port: u16) -> Result<(), String> {
+#[cfg(target_os = "windows")]
+pub fn set_claude_proxy(enable: bool, port: u16) -> Result<(), String> {
     let proxy_url = format!("http://127.0.0.1:{}", port);
-    if enable {
-        let _ = Command::new("git").args(["config", "--global", "http.proxy", &proxy_url]).output();
-        let _ = Command::new("git").args(["config", "--global", "https.proxy", &proxy_url]).output();
-        println!("Git proxy enabled");
+    
+    if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_SET_VALUE) {
+        if enable {
+            let _ = hkcu.set_value("HTTP_PROXY", &proxy_url);
+            let _ = hkcu.set_value("HTTPS_PROXY", &proxy_url);
+            let _ = hkcu.set_value("NODE_TLS_REJECT_UNAUTHORIZED", &"0");
+            println!("Claude (CLI) proxy enabled");
+        } else {
+            let _ = hkcu.delete_value("HTTP_PROXY");
+            let _ = hkcu.delete_value("HTTPS_PROXY");
+            let _ = hkcu.delete_value("NODE_TLS_REJECT_UNAUTHORIZED");
+            println!("Claude (CLI) proxy disabled");
+        }
+        broadcast_env_change();
     } else {
-        let _ = Command::new("git").args(["config", "--global", "--unset", "http.proxy"]).output();
-        let _ = Command::new("git").args(["config", "--global", "--unset", "https.proxy"]).output();
-        println!("Git proxy disabled");
+        return Err("Failed to open registry key".to_string());
     }
+    
     Ok(())
 }
 
-pub fn set_npm_proxy(enable: bool, port: u16) -> Result<(), String> {
-    let proxy_url = format!("http://127.0.0.1:{}", port);
-    let npm_cmd = if cfg!(target_os = "windows") { "npm.cmd" } else { "npm" };
-    
-    if enable {
-        let _ = Command::new(npm_cmd).args(["config", "set", "proxy", &proxy_url]).output();
-        let _ = Command::new(npm_cmd).args(["config", "set", "https-proxy", &proxy_url]).output();
-        println!("NPM proxy enabled");
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_SET_VALUE) {
-                let _ = hkcu.set_value("NODE_TLS_REJECT_UNAUTHORIZED", &"0");
-                broadcast_env_change();
-            }
-        }
-    } else {
-        let _ = Command::new(npm_cmd).args(["config", "delete", "proxy"]).output();
-        let _ = Command::new(npm_cmd).args(["config", "delete", "https-proxy"]).output();
-        println!("NPM proxy disabled");
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_SET_VALUE) {
-                let _ = hkcu.delete_value("NODE_TLS_REJECT_UNAUTHORIZED");
-                broadcast_env_change();
-            }
-        }
-    }
+#[cfg(not(target_os = "windows"))]
+pub fn set_claude_proxy(enable: bool, port: u16) -> Result<(), String> {
+    // 暂不实现非 Windows 平台的逻辑
     Ok(())
 }

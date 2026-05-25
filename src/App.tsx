@@ -15,8 +15,7 @@ function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
-  const [gitProxy, setGitProxy] = useState(false);
-  const [npmProxy, setNpmProxy] = useState(false);
+  const [claudeProxyEnabled, setClaudeProxyEnabled] = useState(false);
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -26,16 +25,14 @@ function App() {
         const savedIspPort = await store.get<number>("ispPort");
         const savedUsername = await store.get<string>("username");
         const savedPassword = await store.get<string>("password");
-        const savedGitProxy = await store.get<boolean>("gitProxy");
-        const savedNpmProxy = await store.get<boolean>("npmProxy");
+        const savedClaudeProxy = await store.get<boolean>("claudeProxyEnabled");
 
         if (savedVpnPort) setVpnPort(savedVpnPort);
         if (savedIspIp) setIspIp(savedIspIp);
         if (savedIspPort) setIspPort(savedIspPort);
         if (savedUsername) setUsername(savedUsername);
         if (savedPassword) setPassword(savedPassword);
-        if (savedGitProxy !== undefined) setGitProxy(savedGitProxy);
-        if (savedNpmProxy !== undefined) setNpmProxy(savedNpmProxy);
+        if (savedClaudeProxy !== undefined) setClaudeProxyEnabled(savedClaudeProxy);
       } catch (e) {
         console.error("Failed to load config", e);
       }
@@ -50,8 +47,7 @@ function App() {
       await store.set("ispPort", ispPort);
       await store.set("username", username);
       await store.set("password", password);
-      await store.set("gitProxy", gitProxy);
-      await store.set("npmProxy", npmProxy);
+      await store.set("claudeProxyEnabled", claudeProxyEnabled);
       await store.save();
       setMessage("配置已保存到本地");
       setTimeout(() => setMessage(""), 3000);
@@ -70,8 +66,7 @@ function App() {
         ispPort,
         username,
         password,
-        gitProxy,
-        npmProxy,
+        claudeProxyEnabled,
       });
       setStatus("success");
       setMessage(res);
@@ -92,22 +87,11 @@ function App() {
     }
   };
 
-  const handleToggleGit = async (enable: boolean) => {
-    setGitProxy(enable);
+  const handleToggleClaude = async (enable: boolean) => {
+    setClaudeProxyEnabled(enable);
     if (status === "running" || status === "success") {
       try {
-        await invoke("toggle_git_proxy", { enable });
-      } catch (err) {
-        console.error(err);
-      }
-    }
-  };
-
-  const handleToggleNpm = async (enable: boolean) => {
-    setNpmProxy(enable);
-    if (status === "running" || status === "success") {
-      try {
-        await invoke("toggle_npm_proxy", { enable });
+        await invoke("toggle_claude_proxy", { enable });
       } catch (err) {
         console.error(err);
       }
@@ -201,42 +185,26 @@ function App() {
         </div>
 
         {/* CLI Proxy Toggles */}
-        <div className="w-full grid grid-cols-2 gap-4">
+        <div className="w-full">
           <div 
-            onClick={() => handleToggleGit(!gitProxy)}
+            onClick={() => handleToggleClaude(!claudeProxyEnabled)}
             className={`cursor-pointer p-4 rounded-xl border transition-all duration-300 flex items-center justify-between ${
-              gitProxy ? "bg-cyan-500/10 border-cyan-500/30" : "bg-zinc-900/50 border-zinc-800/50"
+              claudeProxyEnabled ? "bg-cyan-500/10 border-cyan-500/30" : "bg-zinc-900/50 border-zinc-800/50"
             }`}
           >
             <div className="flex items-center space-x-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${gitProxy ? "bg-cyan-500/20 text-cyan-400" : "bg-zinc-800 text-zinc-400"}`}>
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path fillRule="evenodd" clipRule="evenodd" d="M11.96 1.056c-6.046 0-10.932 4.887-10.932 10.933 0 4.83 3.132 8.93 7.478 10.378.546.1.745-.236.745-.526 0-.26-.01-1.12-.014-2.046-3.04.66-3.682-1.282-3.682-1.282-.497-1.262-1.214-1.598-1.214-1.598-.992-.68.075-.666.075-.666 1.096.077 1.673 1.126 1.673 1.126.973 1.666 2.553 1.185 3.176.906.1-.705.38-1.185.69-1.458-2.428-.276-4.978-1.214-4.978-5.397 0-1.19.424-2.164 1.12-2.926-.112-.276-.486-1.385.106-2.886 0 0 .915-.293 2.992 1.116a10.395 10.395 0 012.723-.366c.924.004 1.854.125 2.724.366 2.075-1.41 2.99-1.116 2.99-1.116.594 1.501.22 2.61.108 2.886.698.762 1.12 1.736 1.12 2.926 0 4.193-2.553 5.117-4.99 5.388.39.337.74 1.002.74 2.018 0 1.45-.014 2.62-.014 2.973 0 .293.197.632.75.524 4.344-1.452 7.472-5.55 7.472-10.376C22.892 5.943 18.006 1.056 11.96 1.056z" />
+              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${claudeProxyEnabled ? "bg-cyan-500/20 text-cyan-400" : "bg-zinc-800 text-zinc-400"}`}>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                 </svg>
               </div>
-              <div className="text-sm font-medium">Git 代理</div>
-            </div>
-            <div className={`w-10 h-6 rounded-full transition-colors relative ${gitProxy ? "bg-cyan-500" : "bg-zinc-700"}`}>
-              <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${gitProxy ? "left-5" : "left-1"}`}></div>
-            </div>
-          </div>
-
-          <div 
-            onClick={() => handleToggleNpm(!npmProxy)}
-            className={`cursor-pointer p-4 rounded-xl border transition-all duration-300 flex items-center justify-between ${
-              npmProxy ? "bg-rose-500/10 border-rose-500/30" : "bg-zinc-900/50 border-zinc-800/50"
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${npmProxy ? "bg-rose-500/20 text-rose-400" : "bg-zinc-800 text-zinc-400"}`}>
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M4 4H20V20H12V8H8V20H4V4Z" fill="currentColor"/>
-                </svg>
+              <div className="flex flex-col">
+                <span className="text-sm font-medium">Claude (CLI) 代理</span>
+                <span className="text-xs text-zinc-500">为终端注入环境变量，完美适配 Claude Code</span>
               </div>
-              <div className="text-sm font-medium">NPM 代理</div>
             </div>
-            <div className={`w-10 h-6 rounded-full transition-colors relative ${npmProxy ? "bg-rose-500" : "bg-zinc-700"}`}>
-              <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${npmProxy ? "left-5" : "left-1"}`}></div>
+            <div className={`w-10 h-6 rounded-full transition-colors relative ${claudeProxyEnabled ? "bg-cyan-500" : "bg-zinc-700"}`}>
+              <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${claudeProxyEnabled ? "left-5" : "left-1"}`}></div>
             </div>
           </div>
         </div>

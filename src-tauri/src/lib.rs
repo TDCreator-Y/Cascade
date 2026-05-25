@@ -12,13 +12,8 @@ struct AppState {
 }
 
 #[tauri::command]
-fn toggle_git_proxy(enable: bool) -> Result<(), String> {
-    cli_proxy::set_git_proxy(enable, 10808)
-}
-
-#[tauri::command]
-fn toggle_npm_proxy(enable: bool) -> Result<(), String> {
-    cli_proxy::set_npm_proxy(enable, 10808)
+fn toggle_claude_proxy(enable: bool) -> Result<(), String> {
+    cli_proxy::set_claude_proxy(enable, 10808)
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -29,8 +24,7 @@ async fn start_cascade(
     isp_port: u16,
     username: String,
     password: String,
-    git_proxy: bool,
-    npm_proxy: bool,
+    claude_proxy_enabled: bool,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     println!("Cascade Engine Initialized with dynamic parameters");
@@ -46,9 +40,8 @@ async fn start_cascade(
         return Err(e);
     }
 
-    // 同步开启 CLI 代理
-    let _ = cli_proxy::set_git_proxy(git_proxy, 10808);
-    let _ = cli_proxy::set_npm_proxy(npm_proxy, 10808);
+    // 同步开启 Claude CLI 代理
+    let _ = cli_proxy::set_claude_proxy(claude_proxy_enabled, 10808);
 
     let config = Arc::new(CascadeConfig {
         vpn_port,
@@ -82,9 +75,8 @@ async fn stop_cascade(state: State<'_, AppState>) -> Result<String, String> {
         return Err(e);
     }
 
-    // 清除所有的 CLI 代理配置
-    let _ = cli_proxy::set_git_proxy(false, 10808);
-    let _ = cli_proxy::set_npm_proxy(false, 10808);
+    // 清除 Claude CLI 代理配置
+    let _ = cli_proxy::set_claude_proxy(false, 10808);
 
     println!("Cascade Engine Stopped");
     Ok("Cascade Engine stopped and System Proxy restored".to_string())
@@ -101,8 +93,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_cascade, 
             stop_cascade, 
-            toggle_git_proxy, 
-            toggle_npm_proxy
+            toggle_claude_proxy
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -112,8 +103,7 @@ pub fn run() {
             // 确保应用退出时强制恢复系统代理并清除 CLI 代理
             println!("Application exiting, restoring system proxy and CLI proxies...");
             let _ = sys_proxy::disable_sys_proxy();
-            let _ = cli_proxy::set_git_proxy(false, 10808);
-            let _ = cli_proxy::set_npm_proxy(false, 10808);
+            let _ = cli_proxy::set_claude_proxy(false, 10808);
         }
         _ => {}
     });
