@@ -13,7 +13,8 @@ pub fn enable_sys_proxy(port: u16) -> Result<(), String> {
 
     key.set_value("ProxyEnable", &1u32)
         .map_err(|e| format!("Failed to set ProxyEnable: {}", e))?;
-    let proxy_server = format!("127.0.0.1:{}", port);
+    // 强制 Windows 将该代理识别为 SOCKS 代理而非默认的 HTTP 代理
+    let proxy_server = format!("socks=127.0.0.1:{}", port);
     key.set_value("ProxyServer", &proxy_server)
         .map_err(|e| format!("Failed to set ProxyServer: {}", e))?;
 
