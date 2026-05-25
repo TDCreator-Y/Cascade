@@ -1,7 +1,7 @@
 [English](README_en.md) | [中文](README.md)
 
 <div align="center">
-  <img src="https://via.placeholder.com/150?text=Cascade+Logo" alt="Cascade Logo" width="150"/>
+  <img src="docs/logo.jpg" alt="Cascade Logo" width="150" style="border-radius: 20px;"/>
   <h1>Cascade Engine v1.0</h1>
   <p><em>基于 Tauri + Rust 的现代化智能级联网络代理引擎，专为纯净海外 IP 环境打造。</em></p>
 </div>

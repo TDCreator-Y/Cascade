@@ -1,7 +1,7 @@
 [English](README_en.md) | [中文](README.md)
 
 <div align="center">
-  <img src="https://via.placeholder.com/150?text=Cascade+Logo" alt="Cascade Logo" width="150"/>
+  <img src="docs/logo.jpg" alt="Cascade Logo" width="150" style="border-radius: 20px;"/>
   <h1>Cascade Engine v1.0</h1>
   <p><em>A modern, smart cascade network proxy engine built with Tauri + Rust, designed exclusively for pure overseas IP environments.</em></p>
 </div>
