@@ -186,14 +186,28 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     // 1.5 智能分流 (Routing Engine)
     // ==========================================
     let direct_domains = vec![
-        ".cn", "baidu.com", "qq.com", "bilibili.com", "taobao.com", "127.0.0.1", "localhost"
+        ".cn", "baidu.com", "qq.com", "bilibili.com", "taobao.com", "127.0.0.1", "localhost", "github.com"
     ];
     let is_direct = direct_domains.iter().any(|d| host.ends_with(d) || host == *d);
 
     if is_direct {
         println!("Routing Engine: Direct Connect -> {}:{}", host, port);
         let target_addr = format!("{}:{}", host, port);
-        let mut target_stream = TcpStream::connect(&target_addr).await?;
+        
+        // 前置连通性校验与异常处理
+        let mut target_stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&target_addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                eprintln!("Error: Target port {} connectivity check failed for {}: {}", port, host, e);
+                reply_error(&mut client, is_socks5, is_connect).await?;
+                return Err(e.into());
+            }
+            Err(_) => {
+                eprintln!("Error: Target port {} connection timeout for {}", port, host);
+                reply_error(&mut client, is_socks5, is_connect).await?;
+                return Err("Connection timeout".into());
+            }
+        };
         
         if is_socks5 {
             reply_success(&mut client, true).await?;
@@ -214,7 +228,21 @@ async fn handle_client(mut client: TcpStream, config: Arc<CascadeConfig>) -> Res
     // 2. 连接本地 VPN 端口
     // ==========================================
     let vpn_addr = format!("127.0.0.1:{}", config.vpn_port);
-    let mut vpn_stream = TcpStream::connect(&vpn_addr).await?;
+    
+    // 增加 VPN 端口连通性校验
+    let mut vpn_stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&vpn_addr)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            eprintln!("Error: Local VPN port {} connectivity check failed: {}", config.vpn_port, e);
+            reply_error(&mut client, is_socks5, is_connect).await?;
+            return Err(e.into());
+        }
+        Err(_) => {
+            eprintln!("Error: Local VPN port {} connection timeout", config.vpn_port);
+            reply_error(&mut client, is_socks5, is_connect).await?;
+            return Err("VPN Connection timeout".into());
+        }
+    };
 
     // ==========================================
     // 3. 要求本地 VPN 建立通往远程 ISP 的隧道
@@ -307,6 +335,18 @@ async fn reply_success(client: &mut TcpStream, is_socks5: bool) -> Result<(), st
         client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
     } else {
         client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+    }
+    Ok(())
+}
+
+async fn reply_error(client: &mut TcpStream, is_socks5: bool, is_connect: bool) -> Result<(), std::io::Error> {
+    if is_socks5 {
+        // Socks5 0x05 (Connection refused)
+        client.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    } else if is_connect {
+        client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+    } else {
+        client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
     }
     Ok(())
 }
