@@ -13,12 +13,15 @@
     "windows": [
       {
         "title": "Cascade",
-        "width": 800,
-        "height": 600
+        "width": 820,
+        "height": 800,
+        "resizable": true,
+        "minWidth": 480,
+        "minHeight": 600
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' blob: 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: blob: https://asset.localhost; connect-src ipc: http://ipc.localhost https://ipc.localhost ws://localhost wss://localhost http://localhost https://localhost"
     }
   },
   "bundle": {

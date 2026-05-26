@@ -4,7 +4,7 @@ pub mod cli_proxy;
 
 use cascade_core::CascadeConfig;
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::task::JoinHandle;
 
 struct AppState {
@@ -16,7 +16,6 @@ fn toggle_claude_proxy(enable: bool) -> Result<(), String> {
     cli_proxy::set_claude_proxy(enable, 10808)
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 async fn start_cascade(
     vpn_port: u16,
@@ -25,22 +24,54 @@ async fn start_cascade(
     username: String,
     password: String,
     claude_proxy_enabled: bool,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    println!("Cascade Engine Initialized with dynamic parameters");
-    
-    let mut handle_lock = state.server_handle.lock().unwrap();
-    if handle_lock.is_some() {
-        return Err("Cascade Engine is already running".into());
+    // 持锁检查后立即释放，不跨 await 持锁
+    {
+        let handle_lock = state.server_handle.lock().unwrap();
+        if handle_lock.is_some() {
+            return Err("Cascade Engine 已在运行".into());
+        }
     }
 
-    // 开启系统全局代理
+    // 预绑定端口：若端口被占用立即返回友好错误（await 在锁外）
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:10808")
+        .await
+        .map_err(|e| {
+            format!(
+                "启动失败：端口 10808 已被占用，请检查是否有其他程序使用该端口 ({})",
+                e
+            )
+        })?;
+
+    // VPN 端口连通性预检（await 在锁外）
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", vpn_port)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(format!(
+                "VPN 端口 {} 无法连接，请确认 VPN 客户端已启动并监听该端口 ({})",
+                vpn_port, e
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "VPN 端口 {} 连接超时，请确认 VPN 客户端已启动",
+                vpn_port
+            ));
+        }
+    }
+
     if let Err(e) = sys_proxy::enable_sys_proxy(10808) {
         eprintln!("Failed to enable system proxy: {}", e);
         return Err(e);
     }
 
-    // 同步开启 Claude CLI 代理
     let _ = cli_proxy::set_claude_proxy(claude_proxy_enabled, 10808);
 
     let config = Arc::new(CascadeConfig {
@@ -51,35 +82,55 @@ async fn start_cascade(
         password,
     });
 
+    // 日志通道：cascade_core → mpsc → Tauri event
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        while let Some(msg) = log_rx.recv().await {
+            let _ = app_clone.emit("cascade-log", msg);
+        }
+    });
+
     let handle = tokio::spawn(async move {
-        if let Err(e) = cascade_core::start_server(config).await {
+        if let Err(e) = cascade_core::start_server(listener, config, log_tx).await {
             eprintln!("Cascade Engine Fatal Error: {}", e);
         }
     });
 
-    *handle_lock = Some(handle);
+    // 再次加锁写入 handle（检查期间不应有第二个启动，但防御性双检）
+    {
+        let mut handle_lock = state.server_handle.lock().unwrap();
+        if handle_lock.is_some() {
+            handle.abort();
+            return Err("Cascade Engine 已在运行（并发启动冲突）".into());
+        }
+        *handle_lock = Some(handle);
+    }
 
-    Ok("Cascade Engine started and System Proxy taken over".to_string())
+    Ok("Cascade Engine 已启动，系统代理已接管".to_string())
 }
 
 #[tauri::command]
 async fn stop_cascade(state: State<'_, AppState>) -> Result<String, String> {
-    let mut handle_lock = state.server_handle.lock().unwrap();
-    if let Some(handle) = handle_lock.take() {
-        handle.abort(); // 中止后台 TCP 监听任务
+    // 取出 handle 后立即释放锁，abort 在锁外执行
+    let handle = {
+        let mut handle_lock = state.server_handle.lock().unwrap();
+        handle_lock.take()
+    };
+
+    if let Some(h) = handle {
+        h.abort();
     }
 
-    // 恢复系统代理
     if let Err(e) = sys_proxy::disable_sys_proxy() {
         eprintln!("Failed to disable system proxy: {}", e);
         return Err(e);
     }
 
-    // 清除 Claude CLI 代理配置
     let _ = cli_proxy::set_claude_proxy(false, 10808);
 
     println!("Cascade Engine Stopped");
-    Ok("Cascade Engine stopped and System Proxy restored".to_string())
+    Ok("Cascade Engine 已停止，系统代理已恢复".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -91,8 +142,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            start_cascade, 
-            stop_cascade, 
+            start_cascade,
+            stop_cascade,
             toggle_claude_proxy
         ])
         .build(tauri::generate_context!())
@@ -100,8 +151,7 @@ pub fn run() {
 
     app.run(|_app_handle, event| match event {
         tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-            // 确保应用退出时强制恢复系统代理并清除 CLI 代理
-            println!("Application exiting, restoring system proxy and CLI proxies...");
+            println!("Application exiting, restoring system proxy...");
             let _ = sys_proxy::disable_sys_proxy();
             let _ = cli_proxy::set_claude_proxy(false, 10808);
         }

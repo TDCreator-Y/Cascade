@@ -1,5 +1,3 @@
-use std::process::Command;
-
 #[cfg(target_os = "windows")]
 use winreg::{enums::*, RegKey};
 #[cfg(target_os = "windows")]
@@ -28,29 +26,56 @@ fn broadcast_env_change() {
 #[cfg(target_os = "windows")]
 pub fn set_claude_proxy(enable: bool, port: u16) -> Result<(), String> {
     let proxy_url = format!("http://127.0.0.1:{}", port);
-    
-    if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_SET_VALUE) {
+
+    if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+    {
         if enable {
             let _ = hkcu.set_value("HTTP_PROXY", &proxy_url);
             let _ = hkcu.set_value("HTTPS_PROXY", &proxy_url);
-            let _ = hkcu.set_value("NODE_TLS_REJECT_UNAUTHORIZED", &"0");
             println!("Claude (CLI) proxy enabled");
         } else {
             let _ = hkcu.delete_value("HTTP_PROXY");
             let _ = hkcu.delete_value("HTTPS_PROXY");
-            let _ = hkcu.delete_value("NODE_TLS_REJECT_UNAUTHORIZED");
             println!("Claude (CLI) proxy disabled");
         }
         broadcast_env_change();
     } else {
         return Err("Failed to open registry key".to_string());
     }
-    
+
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+// macOS：通过 launchctl 设置用户级环境变量
+#[cfg(target_os = "macos")]
 pub fn set_claude_proxy(enable: bool, port: u16) -> Result<(), String> {
-    // 暂不实现非 Windows 平台的逻辑
+    use std::process::Command;
+
+    let vars = [
+        ("HTTP_PROXY", format!("http://127.0.0.1:{}", port)),
+        ("HTTPS_PROXY", format!("http://127.0.0.1:{}", port)),
+    ];
+
+    for (key, val) in &vars {
+        let status = if enable {
+            Command::new("launchctl")
+                .args(["setenv", key, val])
+                .status()
+        } else {
+            Command::new("launchctl")
+                .args(["unsetenv", key])
+                .status()
+        };
+        if let Err(e) = status {
+            return Err(format!("launchctl failed for {}: {}", key, e));
+        }
+    }
+    Ok(())
+}
+
+// Linux 及其他平台：暂不实现
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn set_claude_proxy(_enable: bool, _port: u16) -> Result<(), String> {
     Ok(())
 }
