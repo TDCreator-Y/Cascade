@@ -23,7 +23,7 @@ pub async fn start_server(config: Arc<CascadeConfig>) -> Result<(), Box<dyn Erro
             if let Err(e) = handle_client(client, cfg).await {
                 // Suppress common connection reset errors to avoid spam
                 let err_str = e.to_string();
-                if !err_str.contains("Connection reset by peer") && !err_str.contains("Broken pipe") {
+                if !err_str.contains("Connection reset by peer") && !err_str.contains("Broken pipe") && !err_str.contains("10053") {
                     eprintln!("Cascade Engine Error [{}]: {}", addr, e);
                 }
             }
